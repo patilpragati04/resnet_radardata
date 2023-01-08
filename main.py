@@ -4,7 +4,6 @@ import keras
 from keras.applications.vgg16 import preprocess_input
 from keras.applications import ResNet50
 from keras.layers import Flatten
-from keras.layers import Dense,BatchNormalization
 from keras.layers import GlobalAveragePooling2D
 from keras.layers import Input
 from keras.layers import Dropout
@@ -15,6 +14,7 @@ from keras.utils import img_to_array
 from keras.utils import load_img
 from keras.metrics import Accuracy, FalseNegatives, FalsePositives, TrueNegatives,TruePositives, Precision, Recall, AUC, BinaryAccuracy
 from sklearn.model_selection import train_test_split
+from keras.layers import Input, Add, Dense, Activation, ZeroPadding2D, BatchNormalization, Flatten, Conv2D, AveragePooling2D, MaxPooling2D, GlobalMaxPooling2D,MaxPool2D
 from keras.utils import to_categorical
 from sklearn.preprocessing import LabelBinarizer
 import matplotlib.pyplot as plt
@@ -25,6 +25,7 @@ warnings.filterwarnings('ignore')
 import cv2
 import os
 import pickle
+from keras.optimizers import SGD
 
 
 # define the base path to the input dataset and then use it to derive
@@ -52,8 +53,8 @@ LB_PATH = os.path.sep.join([BASE_OUTPUT, "lb.pickle"])
 # initialize our initial learning rate, number of epochs to train
 # for, and the batch size
 INIT_LR = 1e-4
-NUM_EPOCHS = 50
-BATCH_SIZE = 32
+NUM_EPOCHS = 1
+BATCH_SIZE = 10
 
 
 # define the names of the classes
@@ -256,16 +257,128 @@ if len(lb.classes_) == 2:
 print("[INFO] preparing model...")
 # construct the head of the model that will be placed on top of the
 # the base model
-base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(224,224, 3))
-base_model.trainable = False
-chopped_resnet = Model(inputs=[base_model.input], outputs=[base_model.layers[90].output])
-classification_output = GlobalAveragePooling2D()(chopped_resnet.output)
-# classification_output = Flatten()(chopped_resnet.output)
-classification_output = Dense(units=1, activation='sigmoid')(classification_output)
-localization_output = Flatten()(chopped_resnet.output)
-localization_output = Dense(units=4, activation='relu')(localization_output)
-model = Model(inputs=[chopped_resnet.input], outputs=[classification_output, localization_output])
-model.summary()
+# base_model = ResNet50(weights='imagenet', include_top=False, input_shape=(224,224, 3))
+# base_model.trainable = False
+# chopped_resnet = Model(inputs=[base_model.input], outputs=[base_model.layers[90].output])
+# classification_output = GlobalAveragePooling2D()(chopped_resnet.output)
+# # classification_output = Flatten()(chopped_resnet.output)
+# classification_output = Dense(units=1, activation='sigmoid')(classification_output)
+# localization_output = Flatten()(chopped_resnet.output)
+# localization_output = Dense(units=4, activation='relu')(localization_output)
+# model = Model(inputs=[chopped_resnet.input], outputs=[classification_output, localization_output])
+# model.summary()
+def identity_block(X, f, filters, stage, block):
+	conv_name_base = 'res' + str(stage) + block + '_branch'
+	bn_name_base = 'bn' + str(stage) + block + '_branch'
+	F1, F2, F3 = filters
+
+	X_shortcut = X
+
+	X = Conv2D(filters=F1, kernel_size=(1, 1), strides=(1, 1), padding='valid', name=conv_name_base + '2a',
+			   kernel_initializer=keras.initializers.glorot_uniform(seed=0))(X)
+	X = BatchNormalization(axis=3, name=bn_name_base + '2a')(X)
+	X = Activation('relu')(X)
+
+	X = Conv2D(filters=F2, kernel_size=(f, f), strides=(1, 1), padding='same', name=conv_name_base + '2b',
+			   kernel_initializer=keras.initializers.glorot_uniform(seed=0))(X)
+	X = BatchNormalization(axis=3, name=bn_name_base + '2b')(X)
+	X = Activation('relu')(X)
+
+	X = Conv2D(filters=F3, kernel_size=(1, 1), strides=(1, 1), padding='valid', name=conv_name_base + '2c',
+			   kernel_initializer=keras.initializers.glorot_uniform(seed=0))(X)
+	X = BatchNormalization(axis=3, name=bn_name_base + '2c')(X)
+
+	X = Add()([X, X_shortcut])  # SKIP Connection
+	X = Activation('relu')(X)
+
+	return X
+
+
+def convolutional_block(X, f, filters, stage, block, s=2):
+	conv_name_base = 'res' + str(stage) + block + '_branch'
+	bn_name_base = 'bn' + str(stage) + block + '_branch'
+
+	F1, F2, F3 = filters
+
+	X_shortcut = X
+
+	X = Conv2D(filters=F1, kernel_size=(1, 1), strides=(s, s), padding='valid', name=conv_name_base + '2a',
+			   kernel_initializer=keras.initializers.glorot_uniform(seed=0))(X)
+	X = BatchNormalization(axis=3, name=bn_name_base + '2a')(X)
+	X = Activation('relu')(X)
+
+	X = Conv2D(filters=F2, kernel_size=(f, f), strides=(1, 1), padding='same', name=conv_name_base + '2b',
+			   kernel_initializer=keras.initializers.glorot_uniform(seed=0))(X)
+	X = BatchNormalization(axis=3, name=bn_name_base + '2b')(X)
+	X = Activation('relu')(X)
+
+	X = Conv2D(filters=F3, kernel_size=(1, 1), strides=(1, 1), padding='valid', name=conv_name_base + '2c',
+			   kernel_initializer=keras.initializers.glorot_uniform(seed=0))(X)
+	X = BatchNormalization(axis=3, name=bn_name_base + '2c')(X)
+
+	X_shortcut = Conv2D(filters=F3, kernel_size=(1, 1), strides=(s, s), padding='valid', name=conv_name_base + '1',
+						kernel_initializer=keras.initializers.glorot_uniform(seed=0))(X_shortcut)
+	X_shortcut = BatchNormalization(axis=3, name=bn_name_base + '1')(X_shortcut)
+
+	X = Add()([X, X_shortcut])
+	X = Activation('relu')(X)
+
+	return X
+
+
+def ResNet50(input_shape=(224, 224, 3)):
+	X_input = Input(input_shape)
+
+	X = ZeroPadding2D((3, 3))(X_input)
+
+	X = Conv2D(64, (7, 7), strides=(2, 2), name='conv1', kernel_initializer=keras.initializers.glorot_uniform(seed=0))(X)
+	X = BatchNormalization(axis=3, name='bn_conv1')(X)
+	X = Activation('relu')(X)
+	X = MaxPooling2D((3, 3), strides=(2, 2))(X)
+
+	X = convolutional_block(X, f=3, filters=[64, 64, 256], stage=2, block='a', s=1)
+	X = identity_block(X, 3, [64, 64, 256], stage=2, block='b')
+	X = identity_block(X, 3, [64, 64, 256], stage=2, block='c')
+
+	X = convolutional_block(X, f=3, filters=[128, 128, 512], stage=3, block='a', s=2)
+	X = identity_block(X, 3, [128, 128, 512], stage=3, block='b')
+	X = identity_block(X, 3, [128, 128, 512], stage=3, block='c')
+	X = identity_block(X, 3, [128, 128, 512], stage=3, block='d')
+
+	X = convolutional_block(X, f=3, filters=[256, 256, 1024], stage=4, block='a', s=2)
+	X = identity_block(X, 3, [256, 256, 1024], stage=4, block='b')
+	X = identity_block(X, 3, [256, 256, 1024], stage=4, block='c')
+	X = identity_block(X, 3, [256, 256, 1024], stage=4, block='d')
+	X = identity_block(X, 3, [256, 256, 1024], stage=4, block='e')
+	X = identity_block(X, 3, [256, 256, 1024], stage=4, block='f')
+
+	X = X = convolutional_block(X, f=3, filters=[512, 512, 2048], stage=5, block='a', s=2)
+	X = identity_block(X, 3, [512, 512, 2048], stage=5, block='b')
+	X = identity_block(X, 3, [512, 512, 2048], stage=5, block='c')
+
+	X = AveragePooling2D(pool_size=(2, 2), padding='same')(X)
+
+	model = Model(inputs=X_input, outputs=X, name='ResNet50')
+
+	return model
+base_model = ResNet50(input_shape=(224, 224, 3))
+headModel = base_model.output
+headModel = Flatten()(headModel)
+headModel=Dense(256, activation='relu', name='fc1',kernel_initializer=keras.initializers.glorot_uniform(seed=0))(headModel)
+headModel=Dense(128, activation='relu', name='fc2',kernel_initializer=keras.initializers.glorot_uniform(seed=0))(headModel)
+headModel = Dense( 1,activation='sigmoid', name='fc3',kernel_initializer=keras.initializers.glorot_uniform(seed=0))(headModel)
+
+model = Model(inputs=base_model.input, outputs=headModel)
+print(model.summary())
+Train_weight_PATH = os.path.sep.join([BASE_PATH, "resnet50_weights_tf_dim_ordering_tf_kernels_notop.h5"])
+base_model.load_weights(Train_weight_PATH)
+for layer in base_model.layers:
+	layer.trainable = False
+# compile the model
+opt = SGD(lr=1e-4, momentum=0.9)
+model.compile(optimizer=opt, metrics=['accuracy'], loss=['mse'])
+#for layer in model.layers:
+    # print(layer, layer.trainable)
 # place the head FC model on top of the base model (this will become
 # the actual model we will train)
 # model = Model(inputs=baseModel.input, outputs=headModel)
@@ -273,26 +386,19 @@ model.summary()
 # # *not* be updated during the training process
 # for layer in baseModel.layers:
 # 	layer.trainable = False
-early_stopping = keras.callbacks.EarlyStopping(monitor='loss', patience=5,mode='auto')
+early_stopping = keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=20 , mode='max',verbose=1)
 callback = keras.callbacks.ModelCheckpoint(MODEL_PATH, monitor='val_accuracy', mode='max', verbose=1, save_best_only=True)
 
-# compile the model
 
-model.compile(optimizer='adam', metrics=['accuracy'],loss=['binary_crossentropy', 'mse'],loss_weights=[800, 1] )
-print(model.summary())
 # train the model
 print("[INFO] training model...")
-H = model.fit(train_data, [train_boxes[:, 0],train_boxes[:, 1]], batch_size=32, epochs=50, verbose=1,
- 	validation_data=(validation_data, [validation_boxes[:, 0],validation_boxes[:, 1]]),
-    shuffle=True,callbacks=[callback,early_stopping])
+H = model.fit(train_data, train_boxes, batch_size=10, epochs=1, verbose=1, validation_data=(validation_data, validation_boxes), callbacks=[callback,early_stopping])
 stopped_epoch = (early_stopping.stopped_epoch+1)
 print(stopped_epoch)
 # serialize the model to disk
 print("[INFO] saving object detector model...")
 model.save(MODEL_PATH, save_format="h5")
-# serialize the model to disk
-print("[INFO] saving object detector model...")
-model.save(MODEL_PATH, save_format="h5")
+
 for i in range(len(model.layers)):
 	layer = model.layers[i]
 	if 'conv' not in layer.name:
@@ -326,8 +432,8 @@ plt.style.use("ggplot")
 N = stopped_epoch
 plt.style.use("ggplot")
 plt.figure()
-plt.plot(np.arange(0, stopped_epoch), H.history["dense_loss"], label="train_loss")
-plt.plot(np.arange(0, stopped_epoch), H.history["val_dense_loss"], label="val_loss")
+plt.plot(np.arange(0, stopped_epoch), H.history["loss"], label="train_loss")
+plt.plot(np.arange(0, stopped_epoch), H.history["val_loss"], label="val_loss")
 plt.title("Bounding Box Regression Loss on Training Set")
 plt.xlabel("Epoch #")
 plt.ylabel("Loss")
@@ -338,8 +444,8 @@ plt.close()
 N = stopped_epoch
 plt.style.use("ggplot")
 plt.figure()
-plt.plot(np.arange(0, stopped_epoch), H.history["dense_accuracy"], label="Accuracy")
-plt.plot(np.arange(0, stopped_epoch), H.history["val_dense_accuracy"], label="val_Accuracy")
+plt.plot(np.arange(0, stopped_epoch), H.history["accuracy"], label="Accuracy")
+plt.plot(np.arange(0, stopped_epoch), H.history["val_accuracy"], label="val_Accuracy")
 plt.title("Bounding Box Regression Loss on Training Set")
 plt.xlabel("Epoch #")
 plt.ylabel("Accuracy")
