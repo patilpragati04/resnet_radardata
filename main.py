@@ -52,9 +52,9 @@ LB_PATH = os.path.sep.join([BASE_OUTPUT, "lb.pickle"])
 
 # initialize our initial learning rate, number of epochs to train
 # for, and the batch size
-INIT_LR = 1e-4
-NUM_EPOCHS = 1
-BATCH_SIZE = 10
+INIT_LR = 1e-6
+NUM_EPOCHS = 50
+BATCH_SIZE = 16
 
 
 # define the names of the classes
@@ -366,7 +366,8 @@ headModel = base_model.output
 headModel = Flatten()(headModel)
 headModel=Dense(256, activation='relu', name='fc1',kernel_initializer=keras.initializers.glorot_uniform(seed=0))(headModel)
 headModel=Dense(128, activation='relu', name='fc2',kernel_initializer=keras.initializers.glorot_uniform(seed=0))(headModel)
-headModel = Dense( 1,activation='sigmoid', name='fc3',kernel_initializer=keras.initializers.glorot_uniform(seed=0))(headModel)
+headModel =Dropout(0.4)(headModel)
+headModel = Dense(1,activation='sigmoid', name='fc3',kernel_initializer=keras.initializers.glorot_uniform(seed=0))(headModel)
 
 model = Model(inputs=base_model.input, outputs=headModel)
 print(model.summary())
@@ -375,7 +376,7 @@ base_model.load_weights(Train_weight_PATH)
 for layer in base_model.layers:
 	layer.trainable = False
 # compile the model
-opt = SGD(lr=1e-4, momentum=0.9)
+opt = SGD(lr=1e-6, momentum=0.9)
 model.compile(optimizer=opt, metrics=['accuracy'], loss=['mse'])
 #for layer in model.layers:
     # print(layer, layer.trainable)
@@ -392,7 +393,7 @@ callback = keras.callbacks.ModelCheckpoint(MODEL_PATH, monitor='val_accuracy', m
 
 # train the model
 print("[INFO] training model...")
-H = model.fit(train_data, train_boxes, batch_size=10, epochs=1, verbose=1, validation_data=(validation_data, validation_boxes), callbacks=[callback,early_stopping])
+H = model.fit(train_data, train_boxes, batch_size=16, epochs=50, verbose=1, validation_data=(validation_data, validation_boxes), callbacks=[callback,early_stopping])
 stopped_epoch = (early_stopping.stopped_epoch+1)
 print(stopped_epoch)
 # serialize the model to disk
